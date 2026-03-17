@@ -1,0 +1,7 @@
+scenarios:
+  - id: corridor_head_on
+    description: Robot meets a pedestrian in a narrow corridor.
+  - id: corridor_cart_blockage
+    description: A service cart partially blocks the passage.
+  - id: corner_crossing
+    description: A pedestrian crosses near a blind corner or elevator hall.
