@@ -24,3 +24,13 @@ class ReasoningDecision:
     confidence: float
     rationale: List[str]
     facts: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ConstraintEvaluation:
+    name: str
+    operator: str
+    expected_value: Any
+    actual_value: Any
+    passed: bool
+    source: str

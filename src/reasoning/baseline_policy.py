@@ -1,4 +1,3 @@
-from dataclasses import asdict
 from math import hypot
 from typing import Dict, Iterable, Tuple
 
