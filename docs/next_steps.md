@@ -1,56 +1,33 @@
 # Immediate Next Steps
 
-## What To Do First
+## Current Priority
 
-### Step 1: Freeze the scope
+The current priority is single-image spatial understanding, not robot action decision.
 
-Do not start with full-building navigation.
+The first question the system must answer reliably is:
 
-The first research scope is:
+- `墙在我的哪边，离我有多远？`
 
-- hotel corridor local interaction
-- three scenarios
-- high-level yielding decisions
-- simulation-first validation
+## What Has To Be True
 
-### Step 2: Build the minimum protocol
+Before using a large model, the project needs:
 
-Before writing model code, define:
+- a stable image observation protocol
+- a clear robot-centered coordinate convention
+- geometry functions for distance and side estimation
+- a spatial question answering interface
 
-- scene object schema
-- relation schema
-- constraint JSON format
-- action JSON format
+## Development Order
 
-### Step 3: Build the baseline
+1. keep the perception output format stable
+2. support more spatial question types
+3. replace mock observation files with cloud-based visual outputs
+4. evaluate the correctness of spatial answers
+5. only then move on to robot decision logic
 
-Implement a simple baseline policy with fixed rules:
+## This Week's Target
 
-- slow down when a human is in front within threshold
-- stop when free width is too small
-- replan when blockage persists
-
-### Step 4: Build the constrained reasoning pipeline
-
-Add:
-
-- task parser
-- geometry tools
-- action selector
-- experiment runner
-
-## This Week's Deliverables
-
-- create a GitHub repository if not already created
-- commit the project skeleton
-- define the three target scenarios
-- define the scene and action protocol
-- implement the first geometry utility functions
-
-## Suggested Order
-
-1. finish the protocol
-2. implement the geometry layer
-3. add a rule baseline
-4. add the GCA-style reasoning layer
-5. run the first simulated experiments
+- run the single-image question answering demo
+- inspect whether the returned side and distance are reasonable
+- add more sample observations
+- prepare the cloud-side perception module interface

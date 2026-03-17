@@ -14,6 +14,7 @@ Vector2 = Tuple[float, float]
 class Scenario:
     scenario_id: str
     description: str
+    expected_action: str
     corridor_width_m: float
     corridor_length_m: float
     goal_position: Vector2
@@ -59,6 +60,7 @@ def load_scenarios(config_path: Path) -> Dict[str, Scenario]:
         scenarios[item["id"]] = Scenario(
             scenario_id=item["id"],
             description=item["description"],
+            expected_action=item["expected_action"],
             corridor_width_m=float(item["environment"]["corridor_width_m"]),
             corridor_length_m=float(item["environment"]["corridor_length_m"]),
             goal_position=_to_vector2(item["goal"]["position"]),

@@ -1,34 +1,35 @@
-# Spatial Reasoning for Service Robot Navigation
+# Spatial Reasoning for Service Robot Scene Understanding
 
 This repository is for an undergraduate thesis on spatial reasoning for hotel delivery robots.
 
 ## Thesis Focus
 
-The project studies how a robot can understand local geometric relations in indoor scenes and use that understanding for yielding and avoidance decisions.
+The project studies how a robot can understand local geometric relations in indoor scenes from visual observations.
 
 The core idea is:
 
-1. Build a local semantic-geometric scene representation.
-2. Convert task intent into structured spatial constraints.
-3. Use geometry tools to verify and solve those constraints.
-4. Map the result to robot actions such as slow down, stop, yield, or local replan.
+1. Use conventional perception tools to extract scene observations from an image.
+2. Build a local semantic-geometric scene representation in the robot frame.
+3. Use geometry tools to compute distances and relative directions.
+4. Answer spatial questions such as where a wall is and how far away it is.
 
 ## Target Scenario
 
-The initial target scenario is a hotel corridor environment with three typical interaction cases:
+The current milestone is single-image spatial understanding in a hotel corridor environment.
 
-- head-on encounter with a pedestrian
-- partial blockage by a cart or cleaning trolley
-- crossing motion near a corner or elevator hall
+Example questions:
+
+- which side is the wall on
+- how far is the nearest wall
+- is the door in front of the robot
 
 ## Proposed Stack
 
 - Development: local PC + GitHub + ModelScope cloud workspace
-- Simulation: ROS 2 Jazzy + Gazebo
-- Navigation: Nav2 + collision monitor
-- Perception: RGB-D or LiDAR based local object and free-space extraction
-- Reasoning: GCA-style constrained spatial reasoning
-- Evaluation: success rate, collision count, minimum clearance, time cost, path overhead
+- Perception output: object detections with geometry in robot coordinates
+- Geometry: explicit distance and direction computation
+- Reasoning: GCA-style tool-backed spatial question answering
+- Cloud usage: GPU models later on ModelScope, local development stays lightweight
 
 ## Repository Layout
 
@@ -41,10 +42,10 @@ The initial target scenario is a hotel corridor environment with three typical i
 
 ## Immediate Goal
 
-The first milestone is not full robot deployment. It is to build a reproducible baseline pipeline:
+The first milestone is to build a reproducible single-image spatial understanding pipeline:
 
-1. define the corridor scenarios
-2. define the scene graph and constraint protocol
-3. implement geometry utilities
-4. implement a reasoning stub that outputs structured actions
-5. evaluate against a simple baseline policy
+1. define an image observation protocol
+2. load perception outputs into a scene representation
+3. compute spatial facts such as side and distance
+4. answer basic natural-language spatial questions
+5. later replace the mock perception output with cloud-based vision models

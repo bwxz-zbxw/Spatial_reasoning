@@ -1,6 +1,7 @@
 scenarios:
   - id: corridor_head_on
     description: Robot meets a pedestrian in a narrow corridor.
+    expected_action: stop_and_wait
     environment:
       corridor_width_m: 1.6
       corridor_length_m: 10.0
@@ -27,6 +28,7 @@ scenarios:
 
   - id: corridor_cart_blockage
     description: A service cart partially blocks the passage.
+    expected_action: local_replan
     environment:
       corridor_width_m: 1.7
       corridor_length_m: 12.0
@@ -53,6 +55,7 @@ scenarios:
 
   - id: corner_crossing
     description: A pedestrian crosses near a blind corner or elevator hall.
+    expected_action: slow_down
     environment:
       corridor_width_m: 2.0
       corridor_length_m: 8.0

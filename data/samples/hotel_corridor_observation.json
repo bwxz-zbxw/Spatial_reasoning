@@ -1,0 +1,43 @@
+{
+  "image_id": "hotel_corridor_001",
+  "image_path": "data/samples/hotel_corridor_001.jpg",
+  "reference_frame": "robot_base",
+  "robot_pose_hint": {
+    "yaw_deg": 0.0
+  },
+  "objects": [
+    {
+      "object_id": "left_wall",
+      "category": "wall",
+      "position_robot_frame": [1.2, 0.7, 0.0],
+      "size": [4.0, 0.2, 2.8],
+      "bbox_xyxy": [12, 80, 160, 640],
+      "confidence": 0.97,
+      "attributes": {
+        "surface": "painted"
+      }
+    },
+    {
+      "object_id": "right_wall",
+      "category": "wall",
+      "position_robot_frame": [1.1, -0.75, 0.0],
+      "size": [4.0, 0.2, 2.8],
+      "bbox_xyxy": [1110, 78, 1278, 642],
+      "confidence": 0.96,
+      "attributes": {
+        "surface": "painted"
+      }
+    },
+    {
+      "object_id": "front_door",
+      "category": "door",
+      "position_robot_frame": [3.8, -0.1, 0.0],
+      "size": [0.9, 0.15, 2.0],
+      "bbox_xyxy": [520, 200, 770, 620],
+      "confidence": 0.94,
+      "attributes": {
+        "state": "closed"
+      }
+    }
+  ]
+}
