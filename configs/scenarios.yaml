@@ -1,7 +1,78 @@
 scenarios:
   - id: corridor_head_on
     description: Robot meets a pedestrian in a narrow corridor.
+    environment:
+      corridor_width_m: 1.6
+      corridor_length_m: 10.0
+    robot:
+      object_id: robot
+      category: robot
+      position: [1.0, 0.8]
+      size: [0.55, 0.55]
+      yaw: 0.0
+      velocity: [0.5, 0.0]
+    goal:
+      position: [8.5, 0.8]
+    agents:
+      - object_id: human_1
+        category: human
+        position: [2.2, 0.82]
+        size: [0.55, 0.55]
+        yaw: 3.14
+        velocity: [-0.4, 0.0]
+    thresholds:
+      min_clearance_m: 0.8
+      min_ttc_s: 1.5
+      blockage_timeout_s: 2.0
+
   - id: corridor_cart_blockage
     description: A service cart partially blocks the passage.
+    environment:
+      corridor_width_m: 1.7
+      corridor_length_m: 12.0
+    robot:
+      object_id: robot
+      category: robot
+      position: [1.5, 0.85]
+      size: [0.55, 0.55]
+      yaw: 0.0
+      velocity: [0.45, 0.0]
+    goal:
+      position: [9.0, 0.85]
+    agents:
+      - object_id: cart_1
+        category: cart
+        position: [3.4, 1.2]
+        size: [0.9, 0.6]
+        yaw: 0.0
+        velocity: [0.0, 0.0]
+    thresholds:
+      min_clearance_m: 0.7
+      min_ttc_s: 1.5
+      blockage_timeout_s: 2.0
+
   - id: corner_crossing
     description: A pedestrian crosses near a blind corner or elevator hall.
+    environment:
+      corridor_width_m: 2.0
+      corridor_length_m: 8.0
+    robot:
+      object_id: robot
+      category: robot
+      position: [1.0, 1.0]
+      size: [0.55, 0.55]
+      yaw: 0.0
+      velocity: [0.5, 0.0]
+    goal:
+      position: [6.5, 1.0]
+    agents:
+      - object_id: human_1
+        category: human
+        position: [2.8, 1.6]
+        size: [0.55, 0.55]
+        yaw: -1.57
+        velocity: [0.0, -0.6]
+    thresholds:
+      min_clearance_m: 0.8
+      min_ttc_s: 1.5
+      blockage_timeout_s: 2.0
