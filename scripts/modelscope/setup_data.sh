@@ -27,10 +27,13 @@ echo "Creating data directory '$MMSI_DATA_DIR'..."
 mkdir -p "$MMSI_DATA_DIR"
 
 echo "Downloading MMSI-Bench from ModelScope..."
+# Use HuggingFace mirror for China
+export HF_ENDPOINT="https://hf-mirror.com"
+
 # Using ModelScope SDK or HuggingFace CLI depending on availability
 # If ModelScope runs HuggingFace models, we can use hf-cli, or we can use `modelscope download` if available.
 # Let's try HuggingFace CLI first as it's more universal.
-huggingface-cli download RunsenXu/MMSI-Bench --local-dir "$MMSI_DATA_DIR" --repo-type dataset
+huggingface-cli download RunsenXu/MMSI-Bench --local-dir "$MMSI_DATA_DIR" --repo-type dataset --resume-download
 
 echo "MMSI Data setup complete!"
 echo "Check '$TARGET_DIR/$MMSI_DATA_DIR' for downloaded files."
