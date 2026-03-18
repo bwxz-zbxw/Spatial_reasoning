@@ -1,21 +1,22 @@
 #!/bin/bash
 
 # Configuration
+# On ModelScope, /mnt/workspace/ is persistent.
 GCA_REPO_URL="https://github.com/Zx55/GCA.git"
-TARGET_DIR="gca"
+TARGET_DIR="/mnt/workspace/gca_persistent"
 
-# Ensure we are in the project root
-cd "$(dirname "$0")/../.." || { echo "Error: Could not navigate to project root"; exit 1; }
+# Ensure we have git
+if ! command -v git &> /dev/null; then
+    echo "GiT not found. Installing..."
+    apt-get update && apt-get install -y git
+fi
 
-echo "Current directory: $(pwd)"
-
-# 1. Clone GCA if not present
+# 1. Clone GCA to persistent storage if not present
 if [ ! -d "$TARGET_DIR" ]; then
     echo "Cloning GCA repository into $TARGET_DIR..."
     git clone "$GCA_REPO_URL" "$TARGET_DIR"
 else
-    echo "GCA directory '$TARGET_DIR' already exists. Skipping clone/pull."
-    # cd "$TARGET_DIR" && git pull && cd ..  # Disabled to avoid errors if repo state is weird
+    echo "GCA directory '$TARGET_DIR' already exists."
 fi
 
 # Navigate into GCA directory
@@ -26,6 +27,7 @@ echo "Setting up GCA environment in $(pwd)..."
 # 2. Python Environment Setup
 echo "Installing PyTorch 2.5.1+..."
 pip install torch>=2.5.1 torchvision>=0.20.1 torchaudio>=2.5.1 --index-url https://download.pytorch.org/whl/cu124
+
 
 echo "Installing GCA requirements..."
 pip install -r requirements/gca.txt

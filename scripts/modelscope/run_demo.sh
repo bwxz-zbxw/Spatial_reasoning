@@ -1,11 +1,9 @@
 #!/bin/bash
 
 # Configuration
-TARGET_DIR="gca"
+# On ModelScope, /mnt/workspace/ is persistent.
+TARGET_DIR="/mnt/workspace/gca_persistent"
 PYTHON_CMD="python"
-
-# Ensure we are in the project root
-cd "$(dirname "$0")/../.." || { echo "Error: Could not navigate to project root"; exit 1; }
 
 # Check for GCA directory
 if [ ! -d "$TARGET_DIR" ]; then
