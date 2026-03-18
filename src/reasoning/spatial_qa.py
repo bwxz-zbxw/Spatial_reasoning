@@ -55,6 +55,8 @@ class SpatialQuestionAnswerer:
             return "door"
         if "人" in question or "行人" in question:
             return "human"
+        if "桌" in question:
+            return "table"
         return "wall"
 
     def _build_evidence(self, obj: ObservedObject) -> dict:
@@ -91,7 +93,7 @@ class SpatialQuestionAnswerer:
         return "；".join(parts) + "。"
 
     def _category_name(self, category: str) -> str:
-        mapping = {"wall": "墙", "door": "门", "human": "行人"}
+        mapping = {"wall": "墙", "door": "门", "human": "行人", "table": "桌子"}
         return mapping.get(category, category)
 
     def _side_name(self, side: str) -> str:
