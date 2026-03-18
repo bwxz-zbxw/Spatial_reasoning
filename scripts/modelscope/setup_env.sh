@@ -14,8 +14,8 @@ if [ ! -d "$TARGET_DIR" ]; then
     echo "Cloning GCA repository into $TARGET_DIR..."
     git clone "$GCA_REPO_URL" "$TARGET_DIR"
 else
-    echo "GCA directory '$TARGET_DIR' already exists. Pulling latest changes..."
-    cd "$TARGET_DIR" && git pull && cd ..
+    echo "GCA directory '$TARGET_DIR' already exists. Skipping clone/pull."
+    # cd "$TARGET_DIR" && git pull && cd ..  # Disabled to avoid errors if repo state is weird
 fi
 
 # Navigate into GCA directory
