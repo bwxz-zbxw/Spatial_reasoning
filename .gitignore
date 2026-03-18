@@ -7,3 +7,5 @@ results/logs/
 results/metrics/
 SUNRGBD/
 SUNRGBDtoolbox/
+groundtruth/
+groundtruth.zip
