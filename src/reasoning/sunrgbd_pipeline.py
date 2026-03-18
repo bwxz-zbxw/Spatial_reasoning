@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from src.geometry.sunrgbd_solver import SUNRGBDGeometrySolver
 from src.perception.sunrgbd_loader import SUNRGBDLoader
-from src.reasoning.question_formalizer import QuestionFormalizer
+from src.reasoning.question_formalizer import build_question_formalizer
 
 
 @dataclass
@@ -20,7 +20,7 @@ class SUNRGBDPipeline:
     """Question formalization + SUNRGBD geometry solving."""
 
     def __init__(self) -> None:
-        self.formalizer = QuestionFormalizer()
+        self.formalizer = build_question_formalizer()
         self.loader = SUNRGBDLoader()
         self.solver = SUNRGBDGeometrySolver()
 
