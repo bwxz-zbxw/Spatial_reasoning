@@ -14,6 +14,14 @@ class Open3DObstacleCluster:
     extent_robot_frame: tuple[float, float, float]
 
 
+@dataclass
+class PlaneFitResult:
+    normal_robot_frame: tuple[float, float, float]
+    offset_d: float
+    inlier_count: int
+    mean_error_m: float
+
+
 def depth_to_robot_point_cloud(
     depth_m: np.ndarray,
     intrinsics: np.ndarray,
@@ -137,3 +145,40 @@ def cluster_obstacles(
             )
         )
     return clusters
+
+
+def fit_plane_ransac(
+    points_robot: np.ndarray,
+    distance_threshold: float = 0.03,
+    ransac_n: int = 3,
+    num_iterations: int = 250,
+    min_points: int = 80,
+) -> PlaneFitResult | None:
+    if points_robot is None or len(points_robot) < min_points:
+        return None
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.asarray(points_robot, dtype=np.float64))
+    plane_model, inliers = pcd.segment_plane(
+        distance_threshold=distance_threshold,
+        ransac_n=ransac_n,
+        num_iterations=num_iterations,
+    )
+    if len(inliers) < min_points:
+        return None
+
+    a, b, c, d = [float(value) for value in plane_model]
+    normal = np.asarray([a, b, c], dtype=np.float32)
+    normal_norm = float(np.linalg.norm(normal))
+    if normal_norm < 1e-6:
+        return None
+    normal = normal / normal_norm
+
+    inlier_points = np.asarray(pcd.points)[inliers]
+    errors = np.abs((inlier_points @ normal.astype(np.float64)) + d)
+    return PlaneFitResult(
+        normal_robot_frame=(float(normal[0]), float(normal[1]), float(normal[2])),
+        offset_d=d,
+        inlier_count=int(len(inliers)),
+        mean_error_m=float(errors.mean()) if errors.size else 0.0,
+    )

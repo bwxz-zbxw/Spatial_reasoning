@@ -8,6 +8,7 @@ import numpy as np
 from src.geometry.open3d_geometry import (
     cluster_obstacles,
     depth_to_robot_point_cloud,
+    fit_plane_ransac,
     remove_floor_and_far_background,
     remove_large_planar_surfaces,
 )
@@ -22,6 +23,9 @@ class WallEstimate:
     forward_distance_m: float
     distance_m: float
     valid_point_count: int
+    normal_robot_frame: tuple[float, float, float] | None = None
+    plane_inlier_count: int | None = None
+    plane_fit_error_m: float | None = None
 
 
 @dataclass
@@ -103,6 +107,7 @@ class RGBDGeometryBranch:
         intrinsics: np.ndarray,
         detected_objects: Iterable[ObservedObject] | None = None,
         frame_index: int | None = None,
+        guidance_maps: dict[str, np.ndarray] | None = None,
     ) -> SceneGeometryState:
         if frame_index is None:
             self._frame_counter += 1
@@ -111,7 +116,7 @@ class RGBDGeometryBranch:
             self._frame_counter = frame_index
 
         depth_clean = self._sanitize_depth(depth_m)
-        walls = self._extract_corridor_walls(depth_clean, intrinsics)
+        walls = self._extract_corridor_walls(depth_clean, intrinsics, guidance_maps)
         left_wall_raw = next((wall for wall in walls if wall.side == "left"), None)
         right_wall_raw = next((wall for wall in walls if wall.side == "right"), None)
         left_wall = self._update_wall_track("left", left_wall_raw, frame_index)
@@ -122,11 +127,17 @@ class RGBDGeometryBranch:
             corridor_width = round(left_wall.lateral_distance_m + right_wall.lateral_distance_m, 3)
 
         obstacles = list(detected_objects or [])
-        open3d_obstacles = self._extract_open3d_obstacles(depth_clean, intrinsics, left_wall, right_wall)
+        open3d_obstacles = self._extract_open3d_obstacles(
+            depth_clean,
+            intrinsics,
+            left_wall,
+            right_wall,
+            guidance_maps,
+        )
         if open3d_obstacles:
             obstacles.extend(open3d_obstacles)
         else:
-            obstacles.extend(self._extract_depth_obstacles(depth_clean, intrinsics, left_wall, right_wall))
+            obstacles.extend(self._extract_depth_obstacles(depth_clean, intrinsics, left_wall, right_wall, guidance_maps))
         obstacle_estimates = self._serialize_obstacles(obstacles)
         nearest_obstacle = self._nearest_obstacle(obstacles)
         gaps, blocking_ids, traversable_width = self._estimate_free_space(left_wall, right_wall, obstacles)
@@ -227,6 +238,9 @@ class RGBDGeometryBranch:
                 3,
             ),
             valid_point_count=observed.valid_point_count,
+            normal_robot_frame=self._blend_wall_normals(track.estimate.normal_robot_frame, observed.normal_robot_frame),
+            plane_inlier_count=observed.plane_inlier_count,
+            plane_fit_error_m=observed.plane_fit_error_m,
         )
         track.estimate = smoothed
         track.confidence = min(1.0, 0.7 * track.confidence + 0.3)
@@ -246,6 +260,7 @@ class RGBDGeometryBranch:
         intrinsics: np.ndarray,
         left_wall: WallEstimate | None,
         right_wall: WallEstimate | None,
+        guidance_maps: dict[str, np.ndarray] | None = None,
     ) -> List[ObservedObject]:
         if left_wall is None or right_wall is None:
             return []
@@ -286,7 +301,7 @@ class RGBDGeometryBranch:
 
         corridor_cloud = filtered.select_by_index(np.where(corridor_mask)[0].tolist())
         clusters = cluster_obstacles(corridor_cloud, eps=0.10, min_points=80)
-        clusters = self._select_open3d_clusters(clusters)
+        clusters = self._select_open3d_clusters(clusters, intrinsics, guidance_maps)
 
         obstacles: List[ObservedObject] = []
         for cluster in clusters:
@@ -317,7 +332,12 @@ class RGBDGeometryBranch:
             )
         return obstacles
 
-    def _select_open3d_clusters(self, clusters: List) -> List:
+    def _select_open3d_clusters(
+        self,
+        clusters: List,
+        intrinsics: np.ndarray,
+        guidance_maps: dict[str, np.ndarray] | None = None,
+    ) -> List:
         selected = []
         for cluster in clusters:
             depth_extent, width_extent, height_extent = cluster.extent_robot_frame
@@ -327,20 +347,46 @@ class RGBDGeometryBranch:
                 continue
             if height_extent < 0.08:
                 continue
-            selected.append(cluster)
+            guidance_score = self._sample_guidance_for_cluster(cluster, intrinsics, guidance_maps)
+            selected.append((cluster, guidance_score))
 
         if not selected:
             return []
 
         selected = sorted(
             selected,
-            key=lambda cluster: (
-                -cluster.point_count,
-                -cluster.extent_robot_frame[1],
-                cluster.center_robot_frame[0],
+            key=lambda item: (
+                -item[1],
+                -item[0].point_count,
+                -item[0].extent_robot_frame[1],
+                item[0].center_robot_frame[0],
             ),
         )
-        return selected[:2]
+        return [item[0] for item in selected[:2]]
+
+    def _sample_guidance_for_cluster(
+        self,
+        cluster,
+        intrinsics: np.ndarray,
+        guidance_maps: dict[str, np.ndarray] | None = None,
+    ) -> float:
+        if not guidance_maps or "obstacle_guidance_map" not in guidance_maps:
+            return 0.0
+
+        guidance_map = guidance_maps["obstacle_guidance_map"]
+        forward, lateral, vertical = cluster.center_robot_frame
+        u, v = self._project_robot_point_to_image(forward, lateral, vertical, intrinsics, guidance_map.shape)
+        if u is None or v is None:
+            return 0.0
+
+        x1 = max(0, u - 3)
+        x2 = min(guidance_map.shape[1], u + 4)
+        y1 = max(0, v - 3)
+        y2 = min(guidance_map.shape[0], v + 4)
+        patch = guidance_map[y1:y2, x1:x2]
+        if patch.size == 0:
+            return 0.0
+        return float(np.nanmean(patch))
 
     def _extract_depth_obstacles(
         self,
@@ -348,6 +394,7 @@ class RGBDGeometryBranch:
         intrinsics: np.ndarray,
         left_wall: WallEstimate | None,
         right_wall: WallEstimate | None,
+        guidance_maps: dict[str, np.ndarray] | None = None,
     ) -> List[ObservedObject]:
         if left_wall is None or right_wall is None:
             return []
@@ -381,6 +428,10 @@ class RGBDGeometryBranch:
             & (vertical > -0.2)
             & (vertical < 1.4)
         )
+        if guidance_maps and "obstacle_guidance_map" in guidance_maps:
+            guidance_map = guidance_maps["obstacle_guidance_map"][y_start:y_end, :]
+            guidance_values = guidance_map[valid]
+            point_mask = point_mask & (guidance_values > np.nanpercentile(guidance_values, 45))
         if int(point_mask.sum()) < 80:
             return []
 
@@ -469,10 +520,15 @@ class RGBDGeometryBranch:
         depth_clean[invalid] = np.nan
         return depth_clean
 
-    def _extract_corridor_walls(self, depth_m: np.ndarray, intrinsics: np.ndarray) -> List[WallEstimate]:
+    def _extract_corridor_walls(
+        self,
+        depth_m: np.ndarray,
+        intrinsics: np.ndarray,
+        guidance_maps: dict[str, np.ndarray] | None = None,
+    ) -> List[WallEstimate]:
         estimates: List[WallEstimate] = []
         for side in ("left", "right"):
-            estimate = self._estimate_side_wall(depth_m, intrinsics, side)
+            estimate = self._estimate_side_wall(depth_m, intrinsics, side, guidance_maps)
             if estimate is not None:
                 estimates.append(estimate)
         return estimates
@@ -482,6 +538,7 @@ class RGBDGeometryBranch:
         depth_m: np.ndarray,
         intrinsics: np.ndarray,
         side: str,
+        guidance_maps: dict[str, np.ndarray] | None = None,
     ) -> WallEstimate | None:
         height, width = depth_m.shape
         y_start = int(height * 0.28)
@@ -493,24 +550,166 @@ class RGBDGeometryBranch:
         if int(valid.sum()) < 40:
             return None
 
-        _, u_coords = np.where(valid)
+        v_coords, u_coords = np.where(valid)
         z = roi[valid]
         u = u_coords.astype(np.float32) + x_start
+        v = v_coords.astype(np.float32) + y_start
         x_camera = ((u - intrinsics[0, 2]) / intrinsics[0, 0]) * z
+        y_camera = ((v - intrinsics[1, 2]) / intrinsics[1, 1]) * z
+
+        lateral_values = -x_camera
+        vertical_values = -y_camera
 
         side_mask = x_camera < 0 if side == "left" else x_camera > 0
+        if guidance_maps and "wall_guidance_map" in guidance_maps:
+            guidance_roi = guidance_maps["wall_guidance_map"][y_start:y_end, x_start:x_end]
+            guidance_values = guidance_roi[valid]
+            threshold = np.nanpercentile(guidance_values, 35)
+            side_mask = side_mask & (guidance_values >= threshold)
         if int(side_mask.sum()) < 25:
             return None
 
+        wall_lateral_samples = lateral_values[side_mask]
+        wall_forward_samples = z[side_mask]
+        wall_vertical_samples = vertical_values[side_mask]
+        wall_u_samples = u[side_mask]
+        wall_v_samples = v[side_mask]
+
         lateral = float(np.nanmedian(np.abs(x_camera[side_mask])))
         forward = float(np.nanmedian(z[side_mask]))
+        wall_points = np.stack(
+            [wall_forward_samples, wall_lateral_samples, wall_vertical_samples],
+            axis=1,
+        )
+        plane_fit = self._fit_wall_plane(
+            wall_points=wall_points,
+            u=wall_u_samples,
+            v=wall_v_samples,
+            side=side,
+        )
+
         return WallEstimate(
             side=side,
             lateral_distance_m=round(lateral, 3),
             forward_distance_m=round(forward, 3),
             distance_m=round(float(np.sqrt(lateral**2 + forward**2)), 3),
             valid_point_count=int(side_mask.sum()),
+            normal_robot_frame=plane_fit.normal_robot_frame if plane_fit else None,
+            plane_inlier_count=plane_fit.inlier_count if plane_fit else None,
+            plane_fit_error_m=round(plane_fit.mean_error_m, 4) if plane_fit else None,
         )
+
+    def _fit_wall_plane(
+        self,
+        wall_points: np.ndarray,
+        u: np.ndarray,
+        v: np.ndarray,
+        side: str,
+    ):
+        if len(wall_points) < 80:
+            return None
+
+        lateral_values = wall_points[:, 1]
+        lateral_center = float(np.nanmedian(lateral_values))
+        lateral_band = np.abs(lateral_values - lateral_center) < 0.18
+        lower_v = np.nanpercentile(v, 15)
+        upper_v = np.nanpercentile(v, 85)
+        vertical_band = (v >= lower_v) & (v <= upper_v)
+        support_mask = lateral_band & vertical_band
+        support_points = wall_points[support_mask]
+        if len(support_points) < 80:
+            support_points = wall_points
+
+        plane_fit = fit_plane_ransac(support_points, distance_threshold=0.035, min_points=80)
+        if plane_fit is None:
+            return None
+
+        raw_normal = np.asarray(plane_fit.normal_robot_frame, dtype=np.float32)
+        horizontal_normal = self._estimate_wall_horizontal_normal(support_points, side=side)
+        normal = np.asarray([horizontal_normal[0], horizontal_normal[1], raw_normal[2]], dtype=np.float32)
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm < 1e-6:
+            normal = np.asarray(plane_fit.normal_robot_frame, dtype=np.float32)
+        else:
+            normal = normal / normal_norm
+
+        return plane_fit.__class__(
+            normal_robot_frame=(float(normal[0]), float(normal[1]), float(normal[2])),
+            offset_d=plane_fit.offset_d,
+            inlier_count=plane_fit.inlier_count,
+            mean_error_m=plane_fit.mean_error_m,
+        )
+
+    def _estimate_wall_horizontal_normal(
+        self,
+        wall_points: np.ndarray,
+        side: str,
+    ) -> np.ndarray:
+        xy_points = np.asarray(wall_points[:, :2], dtype=np.float32)
+        if len(xy_points) < 8:
+            return np.asarray([0.0, -1.0], dtype=np.float32) if side == "left" else np.asarray([0.0, 1.0], dtype=np.float32)
+
+        centered = xy_points - xy_points.mean(axis=0, keepdims=True)
+        covariance = centered.T @ centered
+        eigvals, eigvecs = np.linalg.eigh(covariance)
+        tangent = eigvecs[:, int(np.argmax(eigvals))]
+        tangent_norm = float(np.linalg.norm(tangent))
+        if tangent_norm < 1e-6:
+            return np.asarray([0.0, -1.0], dtype=np.float32) if side == "left" else np.asarray([0.0, 1.0], dtype=np.float32)
+        tangent = tangent / tangent_norm
+
+        normal_xy = np.asarray([tangent[1], -tangent[0]], dtype=np.float32)
+        reference = np.asarray([0.0, -1.0], dtype=np.float32) if side == "left" else np.asarray([0.0, 1.0], dtype=np.float32)
+        if float(np.dot(normal_xy, reference)) < 0.0:
+            normal_xy = -normal_xy
+
+        alignment = float(np.dot(normal_xy, reference))
+        if alignment < 0.85:
+            normal_xy = (0.25 * normal_xy) + (0.75 * reference)
+
+        normal_norm = float(np.linalg.norm(normal_xy))
+        if normal_norm < 1e-6:
+            return reference
+        return normal_xy / normal_norm
+
+    def _blend_wall_normals(
+        self,
+        previous: tuple[float, float, float] | None,
+        current: tuple[float, float, float] | None,
+    ) -> tuple[float, float, float] | None:
+        if previous is None:
+            return current
+        if current is None:
+            return previous
+
+        prev = np.asarray(previous, dtype=np.float32)
+        curr = np.asarray(current, dtype=np.float32)
+        blended = ((1.0 - self.wall_alpha) * prev) + (self.wall_alpha * curr)
+        norm = float(np.linalg.norm(blended))
+        if norm < 1e-6:
+            return current
+        blended = blended / norm
+        return (float(blended[0]), float(blended[1]), float(blended[2]))
+
+    def _project_robot_point_to_image(
+        self,
+        forward: float,
+        lateral: float,
+        vertical: float,
+        intrinsics: np.ndarray,
+        image_shape: tuple[int, int],
+    ) -> tuple[int | None, int | None]:
+        if forward <= 0.05:
+            return None, None
+
+        x_camera = -lateral
+        y_camera = -vertical
+        u = int(round((intrinsics[0, 0] * x_camera / forward) + intrinsics[0, 2]))
+        v = int(round((intrinsics[1, 1] * y_camera / forward) + intrinsics[1, 2]))
+        height, width = image_shape
+        if u < 0 or u >= width or v < 0 or v >= height:
+            return None, None
+        return u, v
 
     def _nearest_obstacle(self, objects: List[ObservedObject]) -> ObstacleEstimate | None:
         if not objects:

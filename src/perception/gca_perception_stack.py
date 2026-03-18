@@ -23,6 +23,12 @@ class PerceptionFeatureBundle:
     fused_global_feature: torch.Tensor
 
 
+@dataclass
+class PerceptionGuidanceMaps:
+    wall_guidance_map: torch.Tensor
+    obstacle_guidance_map: torch.Tensor
+
+
 class GCAPerceptionStack(nn.Module):
     """RGB-depth dual-branch perception stack aligned with the planned architecture."""
 
@@ -55,3 +61,28 @@ class GCAPerceptionStack(nn.Module):
             depth_global_feature=depth_global,
             fused_global_feature=fused_global,
         )
+
+    def build_guidance_maps(
+        self,
+        bundle: PerceptionFeatureBundle,
+        output_size: tuple[int, int],
+    ) -> PerceptionGuidanceMaps:
+        fused_strength = bundle.fused_feature_map.abs().mean(dim=1, keepdim=True)
+        fused_strength = self._normalize_map(fused_strength)
+        fused_strength = F.interpolate(fused_strength, size=output_size, mode="bilinear", align_corners=False)
+
+        variance_map = self._normalize_map(bundle.depth_variance_map)
+        variance_map = F.interpolate(variance_map, size=output_size, mode="bilinear", align_corners=False)
+
+        obstacle_guidance = torch.clamp((0.75 * variance_map) + (0.25 * fused_strength), min=0.0, max=1.0)
+        wall_guidance = torch.clamp((0.75 * (1.0 - variance_map)) + (0.25 * fused_strength), min=0.0, max=1.0)
+
+        return PerceptionGuidanceMaps(
+            wall_guidance_map=wall_guidance,
+            obstacle_guidance_map=obstacle_guidance,
+        )
+
+    def _normalize_map(self, tensor: torch.Tensor) -> torch.Tensor:
+        min_value = tensor.amin(dim=(-2, -1), keepdim=True)
+        max_value = tensor.amax(dim=(-2, -1), keepdim=True)
+        return (tensor - min_value) / (max_value - min_value + 1e-6)

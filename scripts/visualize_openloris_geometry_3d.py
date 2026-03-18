@@ -10,12 +10,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.geometry.rgbd_geometry_branch import RGBDGeometryBranch, ObstacleEstimate, SceneGeometryState
+from src.geometry.rgbd_geometry_branch import ObstacleEstimate, SceneGeometryState
+from src.perception.fused_geometry_pipeline import FusedGeometryResult, FusedGeometryPipeline
 from src.perception.openloris_loader import OpenLORISLoader
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Render OpenLORIS geometry state in 3D.")
+    parser = argparse.ArgumentParser(description="Render fused OpenLORIS geometry state with GCA overlays in 3D.")
     parser.add_argument(
         "--sequence-dir",
         type=Path,
@@ -69,26 +70,28 @@ def main() -> None:
 
     last_frame = min(len(frames) - 1, args.start_frame + args.num_frames - 1)
     intrinsics = loader.load_color_intrinsics(args.sequence_dir)
-    branch = RGBDGeometryBranch()
-    branch.reset_tracks()
+    pipeline = FusedGeometryPipeline()
+    pipeline.reset_tracks()
 
     warmup_start = max(0, min(args.warmup_start_frame, args.start_frame))
     output_dir = args.output_dir / args.sequence_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for frame in frames[warmup_start:args.start_frame]:
+        color_rgb = loader.load_color_rgb(frame)
         depth_m = loader.load_aligned_depth_meters(frame)
-        branch.estimate(depth_m=depth_m, intrinsics=intrinsics, detected_objects=[], frame_index=frame.frame_index)
+        pipeline.run(rgb_image=color_rgb, depth_m=depth_m, intrinsics=intrinsics, frame_index=frame.frame_index)
 
     for frame in frames[args.start_frame:last_frame + 1]:
+        color_rgb = loader.load_color_rgb(frame)
         depth_m = loader.load_aligned_depth_meters(frame)
-        state = branch.estimate(depth_m=depth_m, intrinsics=intrinsics, detected_objects=[], frame_index=frame.frame_index)
+        result = pipeline.run(rgb_image=color_rgb, depth_m=depth_m, intrinsics=intrinsics, frame_index=frame.frame_index)
         if (frame.frame_index - args.start_frame) % max(1, args.stride) != 0:
             continue
 
         points = depth_to_robot_points(depth_m, intrinsics, stride=max(1, args.point_stride))
         output_path = output_dir / f"frame_{frame.frame_index:05d}_3d.png"
-        render_3d(points, state, frame.frame_index, output_path)
+        render_3d(points, result, frame.frame_index, output_path)
         print(f"Saved 3D view: {output_path}")
 
 
@@ -121,7 +124,8 @@ def depth_to_robot_points(depth_m: np.ndarray, intrinsics: np.ndarray, stride: i
     return np.stack([forward[mask], lateral[mask], vertical[mask]], axis=1)
 
 
-def render_3d(points: np.ndarray, state: SceneGeometryState, frame_index: int, output_path: Path) -> None:
+def render_3d(points: np.ndarray, result: FusedGeometryResult, frame_index: int, output_path: Path) -> None:
+    state = result.gca_result.constrained_state
     fig = plt.figure(figsize=(12, 6))
     ax3d = fig.add_subplot(1, 2, 1, projection="3d")
     ax_top = fig.add_subplot(1, 2, 2)
@@ -132,6 +136,7 @@ def render_3d(points: np.ndarray, state: SceneGeometryState, frame_index: int, o
         ax_top.scatter(points[:, 0], points[:, 1], c=colors, cmap="viridis", s=2, alpha=0.25)
 
     _draw_walls_3d(ax3d, ax_top, state)
+    _draw_wall_normals(ax3d, ax_top, state)
     _draw_obstacles_3d(ax3d, ax_top, state.obstacles)
     _draw_robot(ax3d, ax_top, state.robot_width_m)
 
@@ -153,11 +158,15 @@ def render_3d(points: np.ndarray, state: SceneGeometryState, frame_index: int, o
     ax_top.set_aspect("equal", adjustable="box")
 
     summary = [
+        f"gca_valid={result.gca_result.geometry_valid}",
         f"corridor_width={_fmt(state.corridor_width_m)} m",
         f"traversable_width={_fmt(state.traversable_width_m)} m",
         f"passable={state.passable}",
         f"left_wall={_fmt(state.left_wall.lateral_distance_m if state.left_wall else None)} m",
         f"right_wall={_fmt(state.right_wall.lateral_distance_m if state.right_wall else None)} m",
+        f"left |nz|={_fmt(result.gca_result.facts.get('left_wall_normal_z_abs'))}",
+        f"right |nz|={_fmt(result.gca_result.facts.get('right_wall_normal_z_abs'))}",
+        f"parallel |cos|={_fmt(result.gca_result.facts.get('wall_parallel_abs_cos'))}",
         f"obstacles={len(state.obstacles)}",
     ]
     fig.text(
@@ -169,6 +178,8 @@ def render_3d(points: np.ndarray, state: SceneGeometryState, frame_index: int, o
         bbox={"facecolor": "black", "alpha": 0.75, "edgecolor": "white", "pad": 8},
         color="white",
     )
+
+    _draw_gca_text(fig, result)
 
     fig.tight_layout(rect=(0, 0.08, 1, 1))
     fig.savefig(output_path, dpi=150)
@@ -193,6 +204,45 @@ def _draw_walls_3d(ax3d, ax_top, state: SceneGeometryState) -> None:
         ax_top.plot(forward, np.full_like(forward, -state.right_wall.lateral_distance_m), color=color, linewidth=2)
 
 
+def _draw_wall_normals(ax3d, ax_top, state: SceneGeometryState) -> None:
+    wall_specs = []
+    if state.left_wall is not None and state.left_wall.normal_robot_frame is not None:
+        wall_specs.append((state.left_wall, state.left_wall.lateral_distance_m, "#40a9ff", "L"))
+    if state.right_wall is not None and state.right_wall.normal_robot_frame is not None:
+        wall_specs.append((state.right_wall, -state.right_wall.lateral_distance_m, "#ff8c3c", "R"))
+
+    for wall, anchor_y, color, label in wall_specs:
+        origin_x = max(0.6, wall.forward_distance_m)
+        origin_y = anchor_y
+        origin_z = 1.0
+        normal = np.asarray(wall.normal_robot_frame, dtype=np.float32)
+        normal = normal / max(1e-6, np.linalg.norm(normal))
+
+        ax3d.quiver(
+            origin_x,
+            origin_y,
+            origin_z,
+            0.5 * normal[0],
+            0.5 * normal[1],
+            0.5 * normal[2],
+            color=color,
+            linewidth=2.0,
+        )
+        ax3d.text(origin_x, origin_y, origin_z + 0.08, f"{label}-normal", color=color, fontsize=8)
+
+        ax_top.arrow(
+            origin_x,
+            origin_y,
+            0.45 * normal[0],
+            0.45 * normal[1],
+            color=color,
+            width=0.01,
+            head_width=0.08,
+            length_includes_head=True,
+        )
+        ax_top.text(origin_x, origin_y, f"{label}", color=color, fontsize=8)
+
+
 def _draw_obstacles_3d(ax3d, ax_top, obstacles: list[ObstacleEstimate]) -> None:
     for obstacle in obstacles:
         draw_box(
@@ -211,6 +261,23 @@ def _draw_obstacles_3d(ax3d, ax_top, obstacles: list[ObstacleEstimate]) -> None:
 def _draw_robot(ax3d, ax_top, robot_width_m: float) -> None:
     draw_box(ax3d, center=(0.0, 0.0, 0.18), size=(0.45, robot_width_m, 0.36), color="#ff4d4f")
     ax_top.add_patch(plt.Rectangle((-0.225, -robot_width_m / 2.0), 0.45, robot_width_m, fill=False, color="#ff4d4f", linewidth=2))
+
+
+def _draw_gca_text(fig, result: FusedGeometryResult) -> None:
+    eval_lines = []
+    for item in result.gca_result.evaluations:
+        status = "OK" if item.passed else "FAIL"
+        eval_lines.append(f"{status:4s} {item.name}: {item.actual_value}")
+
+    fig.text(
+        0.02,
+        0.02,
+        "\n".join(eval_lines[:8]),
+        fontsize=8,
+        family="monospace",
+        bbox={"facecolor": "black", "alpha": 0.75, "edgecolor": "white", "pad": 8},
+        color="white",
+    )
 
 
 def draw_box(ax, center: tuple[float, float, float], size: tuple[float, float, float], color: str) -> None:
