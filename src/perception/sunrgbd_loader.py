@@ -42,11 +42,15 @@ class SUNRGBDLoader:
         )
 
     def load_depth_meters(self, sample: SUNRGBDSample) -> np.ndarray:
-        depth_raw = np.array(Image.open(sample.depth_path), dtype=np.float32)
-        depth_m = depth_raw / 1000.0
+        depth_raw = np.array(Image.open(sample.depth_path), dtype=np.uint16)
+        depth_decoded = np.bitwise_or(np.right_shift(depth_raw, 3), np.left_shift(depth_raw, 13))
+        depth_m = depth_decoded.astype(np.float32) / 1000.0
         invalid = (depth_m <= 0.05) | (depth_m >= 10.0)
         depth_m[invalid] = np.nan
         return depth_m
+
+    def load_rgb_array(self, sample: SUNRGBDSample) -> np.ndarray:
+        return np.array(Image.open(sample.image_path).convert("RGB"), dtype=np.uint8)
 
     def _load_intrinsics(self, path: Path) -> np.ndarray:
         values = [float(item) for item in path.read_text(encoding="utf-8").split()]
