@@ -5,6 +5,12 @@ from typing import Iterable, List
 
 import numpy as np
 
+from src.geometry.open3d_geometry import (
+    cluster_obstacles,
+    depth_to_robot_point_cloud,
+    remove_floor_and_far_background,
+    remove_large_planar_surfaces,
+)
 from src.geometry.spatial_language import euclidean_distance_3d
 from src.perception.observation_protocol import ObservedObject
 
@@ -43,13 +49,29 @@ class SceneGeometryState:
     safety_margin_m: float
     left_wall: WallEstimate | None
     right_wall: WallEstimate | None
+    left_wall_visible: bool | None
+    right_wall_visible: bool | None
+    left_wall_confidence: float | None
+    right_wall_confidence: float | None
     corridor_width_m: float | None
     traversable_width_m: float | None
     passable: bool | None
     nearest_obstacle_distance_m: float | None
     nearest_obstacle: ObstacleEstimate | None
+    obstacles: List[ObstacleEstimate] = field(default_factory=list)
     gaps: List[CorridorGap] = field(default_factory=list)
     blocking_obstacle_ids: List[str] = field(default_factory=list)
+
+
+@dataclass
+class WallTrack:
+    track_id: str
+    side: str
+    estimate: WallEstimate
+    confidence: float
+    last_seen_frame: int
+    visible: bool
+    miss_count: int = 0
 
 
 class RGBDGeometryBranch:
@@ -64,23 +86,48 @@ class RGBDGeometryBranch:
         self.robot_width_m = robot_width_m
         self.safety_margin_m = safety_margin_m
         self.max_obstacle_forward_m = max_obstacle_forward_m
+        self.depth_obstacle_forward_m = min(2.5, max_obstacle_forward_m)
+        self.obstacle_bin_width_m = 0.05
+        self.wall_edge_margin_m = 0.12
+        self.wall_alpha = 0.35
+        self.max_wall_lateral_jump_m = 0.45
+        self.max_wall_forward_jump_m = 1.0
+        self.max_wall_misses = 8
+        self.open3d_stride = 2
+        self._wall_tracks: dict[str, WallTrack] = {}
+        self._frame_counter = -1
 
     def estimate(
         self,
         depth_m: np.ndarray,
         intrinsics: np.ndarray,
         detected_objects: Iterable[ObservedObject] | None = None,
+        frame_index: int | None = None,
     ) -> SceneGeometryState:
+        if frame_index is None:
+            self._frame_counter += 1
+            frame_index = self._frame_counter
+        else:
+            self._frame_counter = frame_index
+
         depth_clean = self._sanitize_depth(depth_m)
         walls = self._extract_corridor_walls(depth_clean, intrinsics)
-        left_wall = next((wall for wall in walls if wall.side == "left"), None)
-        right_wall = next((wall for wall in walls if wall.side == "right"), None)
+        left_wall_raw = next((wall for wall in walls if wall.side == "left"), None)
+        right_wall_raw = next((wall for wall in walls if wall.side == "right"), None)
+        left_wall = self._update_wall_track("left", left_wall_raw, frame_index)
+        right_wall = self._update_wall_track("right", right_wall_raw, frame_index)
 
         corridor_width = None
         if left_wall is not None and right_wall is not None:
             corridor_width = round(left_wall.lateral_distance_m + right_wall.lateral_distance_m, 3)
 
         obstacles = list(detected_objects or [])
+        open3d_obstacles = self._extract_open3d_obstacles(depth_clean, intrinsics, left_wall, right_wall)
+        if open3d_obstacles:
+            obstacles.extend(open3d_obstacles)
+        else:
+            obstacles.extend(self._extract_depth_obstacles(depth_clean, intrinsics, left_wall, right_wall))
+        obstacle_estimates = self._serialize_obstacles(obstacles)
         nearest_obstacle = self._nearest_obstacle(obstacles)
         gaps, blocking_ids, traversable_width = self._estimate_free_space(left_wall, right_wall, obstacles)
 
@@ -96,14 +143,325 @@ class RGBDGeometryBranch:
             safety_margin_m=self.safety_margin_m,
             left_wall=left_wall,
             right_wall=right_wall,
+            left_wall_visible=self._wall_tracks.get("left").visible if self._wall_tracks.get("left") else None,
+            right_wall_visible=self._wall_tracks.get("right").visible if self._wall_tracks.get("right") else None,
+            left_wall_confidence=self._wall_tracks.get("left").confidence if self._wall_tracks.get("left") else None,
+            right_wall_confidence=self._wall_tracks.get("right").confidence if self._wall_tracks.get("right") else None,
             corridor_width_m=corridor_width,
             traversable_width_m=traversable_width,
             passable=passable,
             nearest_obstacle_distance_m=nearest_obstacle.distance_m if nearest_obstacle else None,
             nearest_obstacle=nearest_obstacle,
+            obstacles=obstacle_estimates,
             gaps=gaps,
             blocking_obstacle_ids=blocking_ids,
         )
+
+    def reset_tracks(self) -> None:
+        self._wall_tracks.clear()
+        self._frame_counter = -1
+
+    def _update_wall_track(
+        self,
+        side: str,
+        observed: WallEstimate | None,
+        frame_index: int,
+    ) -> WallEstimate | None:
+        track = self._wall_tracks.get(side)
+
+        if observed is None:
+            if track is None:
+                return None
+            track.miss_count += 1
+            track.visible = False
+            track.confidence *= 0.82
+            if track.miss_count > self.max_wall_misses or track.confidence < 0.2:
+                self._wall_tracks.pop(side, None)
+                return None
+            return track.estimate
+
+        if track is None:
+            self._wall_tracks[side] = WallTrack(
+                track_id=f"{side}_wall",
+                side=side,
+                estimate=observed,
+                confidence=1.0,
+                last_seen_frame=frame_index,
+                visible=True,
+                miss_count=0,
+            )
+            return observed
+
+        if self._is_wall_jump_too_large(track.estimate, observed):
+            track.miss_count += 1
+            track.visible = False
+            track.confidence *= 0.85
+            if track.miss_count > self.max_wall_misses or track.confidence < 0.2:
+                self._wall_tracks[side] = WallTrack(
+                    track_id=f"{side}_wall",
+                    side=side,
+                    estimate=observed,
+                    confidence=0.6,
+                    last_seen_frame=frame_index,
+                    visible=True,
+                    miss_count=0,
+                )
+                return observed
+            return track.estimate
+
+        smoothed = WallEstimate(
+            side=side,
+            lateral_distance_m=round(
+                ((1.0 - self.wall_alpha) * track.estimate.lateral_distance_m)
+                + (self.wall_alpha * observed.lateral_distance_m),
+                3,
+            ),
+            forward_distance_m=round(
+                ((1.0 - self.wall_alpha) * track.estimate.forward_distance_m)
+                + (self.wall_alpha * observed.forward_distance_m),
+                3,
+            ),
+            distance_m=round(
+                ((1.0 - self.wall_alpha) * track.estimate.distance_m)
+                + (self.wall_alpha * observed.distance_m),
+                3,
+            ),
+            valid_point_count=observed.valid_point_count,
+        )
+        track.estimate = smoothed
+        track.confidence = min(1.0, 0.7 * track.confidence + 0.3)
+        track.last_seen_frame = frame_index
+        track.visible = True
+        track.miss_count = 0
+        return smoothed
+
+    def _is_wall_jump_too_large(self, previous: WallEstimate, observed: WallEstimate) -> bool:
+        lateral_jump = abs(previous.lateral_distance_m - observed.lateral_distance_m)
+        forward_jump = abs(previous.forward_distance_m - observed.forward_distance_m)
+        return lateral_jump > self.max_wall_lateral_jump_m or forward_jump > self.max_wall_forward_jump_m
+
+    def _extract_open3d_obstacles(
+        self,
+        depth_m: np.ndarray,
+        intrinsics: np.ndarray,
+        left_wall: WallEstimate | None,
+        right_wall: WallEstimate | None,
+    ) -> List[ObservedObject]:
+        if left_wall is None or right_wall is None:
+            return []
+
+        corridor_left = float(left_wall.lateral_distance_m) + 0.08
+        corridor_right = -float(right_wall.lateral_distance_m) - 0.08
+        if corridor_left <= corridor_right:
+            return []
+
+        pcd, points_robot = depth_to_robot_point_cloud(
+            depth_m=depth_m,
+            intrinsics=intrinsics,
+            stride=self.open3d_stride,
+        )
+        if len(points_robot) == 0:
+            return []
+
+        filtered = remove_floor_and_far_background(
+            pcd,
+            min_height_m=0.08,
+            max_forward_m=self.max_obstacle_forward_m,
+        )
+        filtered = remove_large_planar_surfaces(filtered)
+        if len(filtered.points) == 0:
+            return []
+
+        filtered_points = np.asarray(filtered.points)
+        corridor_mask = (
+            (filtered_points[:, 0] > 0.25)
+            & (filtered_points[:, 0] < self.max_obstacle_forward_m)
+            & (filtered_points[:, 1] > corridor_right)
+            & (filtered_points[:, 1] < corridor_left)
+            & (filtered_points[:, 2] > 0.05)
+            & (filtered_points[:, 2] < 1.6)
+        )
+        if int(corridor_mask.sum()) < 80:
+            return []
+
+        corridor_cloud = filtered.select_by_index(np.where(corridor_mask)[0].tolist())
+        clusters = cluster_obstacles(corridor_cloud, eps=0.10, min_points=80)
+        clusters = self._select_open3d_clusters(clusters)
+
+        obstacles: List[ObservedObject] = []
+        for cluster in clusters:
+            forward, lateral, vertical = cluster.center_robot_frame
+            depth_extent, width_extent, height_extent = cluster.extent_robot_frame
+            if width_extent < 0.08 or height_extent < 0.10:
+                continue
+            if depth_extent > 2.5 or width_extent > 1.6:
+                continue
+
+            obstacles.append(
+                ObservedObject(
+                    object_id=f"open3d_obstacle_{cluster.cluster_id}",
+                    category="obstacle",
+                    position_robot_frame=(round(forward, 3), round(lateral, 3), round(vertical, 3)),
+                    size=(
+                        round(max(0.2, depth_extent), 3),
+                        round(max(0.1, width_extent), 3),
+                        round(max(0.2, height_extent), 3),
+                    ),
+                    bbox_xyxy=(0.0, 0.0, 0.0, 0.0),
+                    confidence=0.7,
+                    attributes={
+                        "source": "open3d_cluster",
+                        "point_count": str(cluster.point_count),
+                    },
+                )
+            )
+        return obstacles
+
+    def _select_open3d_clusters(self, clusters: List) -> List:
+        selected = []
+        for cluster in clusters:
+            depth_extent, width_extent, height_extent = cluster.extent_robot_frame
+            if width_extent < 0.16 and cluster.point_count < 400:
+                continue
+            if width_extent < 0.24 and cluster.point_count < 700:
+                continue
+            if height_extent < 0.08:
+                continue
+            selected.append(cluster)
+
+        if not selected:
+            return []
+
+        selected = sorted(
+            selected,
+            key=lambda cluster: (
+                -cluster.point_count,
+                -cluster.extent_robot_frame[1],
+                cluster.center_robot_frame[0],
+            ),
+        )
+        return selected[:2]
+
+    def _extract_depth_obstacles(
+        self,
+        depth_m: np.ndarray,
+        intrinsics: np.ndarray,
+        left_wall: WallEstimate | None,
+        right_wall: WallEstimate | None,
+    ) -> List[ObservedObject]:
+        if left_wall is None or right_wall is None:
+            return []
+
+        height, width = depth_m.shape
+        y_start = int(height * 0.30)
+        y_end = int(height * 0.70)
+        roi = depth_m[y_start:y_end, :]
+        valid = np.isfinite(roi)
+        if int(valid.sum()) < 100:
+            return []
+
+        v_coords, u_coords = np.where(valid)
+        z = roi[valid]
+        u = u_coords.astype(np.float32)
+        v = v_coords.astype(np.float32) + y_start
+
+        x_camera = ((u - intrinsics[0, 2]) / intrinsics[0, 0]) * z
+        lateral = -x_camera
+        vertical = -((v - intrinsics[1, 2]) / intrinsics[1, 1]) * z
+        forward = z
+
+        left_boundary = float(left_wall.lateral_distance_m) - self.wall_edge_margin_m
+        right_boundary = -float(right_wall.lateral_distance_m) + self.wall_edge_margin_m
+
+        point_mask = (
+            (forward > 0.25)
+            & (forward < self.depth_obstacle_forward_m)
+            & (lateral > right_boundary)
+            & (lateral < left_boundary)
+            & (vertical > -0.2)
+            & (vertical < 1.4)
+        )
+        if int(point_mask.sum()) < 80:
+            return []
+
+        lateral_points = lateral[point_mask]
+        forward_points = forward[point_mask]
+        interval_bins = self._build_obstacle_bins(lateral_points, forward_points, right_boundary, left_boundary)
+        if not interval_bins:
+            return []
+
+        obstacles: List[ObservedObject] = []
+        for index, (start_bin, end_bin, min_forward) in enumerate(interval_bins):
+            start = right_boundary + (start_bin * self.obstacle_bin_width_m)
+            end = right_boundary + ((end_bin + 1) * self.obstacle_bin_width_m)
+            interval_mask = (
+                (lateral_points >= start)
+                & (lateral_points < end)
+                & (forward_points <= min_forward + 0.35)
+            )
+            if int(interval_mask.sum()) < 40:
+                continue
+
+            interval_lateral = lateral_points[interval_mask]
+            interval_forward = forward_points[interval_mask]
+            center_lateral = float(np.nanmedian(interval_lateral))
+            forward_distance = float(np.nanpercentile(interval_forward, 20))
+            width_m = float(max(self.obstacle_bin_width_m, end - start))
+
+            obstacles.append(
+                ObservedObject(
+                    object_id=f"depth_obstacle_{index}",
+                    category="obstacle",
+                    position_robot_frame=(round(forward_distance, 3), round(center_lateral, 3), 0.0),
+                    size=(0.4, round(width_m, 3), 0.8),
+                    bbox_xyxy=(0.0, 0.0, 0.0, 0.0),
+                    confidence=0.6,
+                    attributes={"source": "depth_geometry"},
+                )
+            )
+        return obstacles
+
+    def _build_obstacle_bins(
+        self,
+        lateral_points: np.ndarray,
+        forward_points: np.ndarray,
+        right_boundary: float,
+        left_boundary: float,
+    ) -> List[tuple[int, int, float]]:
+        corridor_width = left_boundary - right_boundary
+        if corridor_width <= self.obstacle_bin_width_m:
+            return []
+
+        num_bins = max(1, int(np.ceil(corridor_width / self.obstacle_bin_width_m)))
+        bin_indices = np.floor((lateral_points - right_boundary) / self.obstacle_bin_width_m).astype(int)
+        bin_indices = np.clip(bin_indices, 0, num_bins - 1)
+
+        min_counts = 25
+        occupied_bins: List[tuple[int, float]] = []
+        for bin_idx in range(num_bins):
+            mask = bin_indices == bin_idx
+            count = int(mask.sum())
+            if count < min_counts:
+                continue
+            forward_value = float(np.nanpercentile(forward_points[mask], 20))
+            if forward_value >= self.depth_obstacle_forward_m:
+                continue
+            occupied_bins.append((bin_idx, forward_value))
+
+        if not occupied_bins:
+            return []
+
+        merged: List[tuple[int, int, float]] = []
+        current_start, current_end, current_min_forward = occupied_bins[0][0], occupied_bins[0][0], occupied_bins[0][1]
+        for bin_idx, forward_value in occupied_bins[1:]:
+            if bin_idx <= current_end + 1:
+                current_end = bin_idx
+                current_min_forward = min(current_min_forward, forward_value)
+            else:
+                merged.append((current_start, current_end, current_min_forward))
+                current_start, current_end, current_min_forward = bin_idx, bin_idx, forward_value
+        merged.append((current_start, current_end, current_min_forward))
+        return merged
 
     def _sanitize_depth(self, depth_m: np.ndarray) -> np.ndarray:
         depth_clean = np.asarray(depth_m, dtype=np.float32).copy()
@@ -159,15 +517,20 @@ class RGBDGeometryBranch:
             return None
 
         nearest = min(objects, key=lambda item: euclidean_distance_3d(item.position_robot_frame))
-        forward, lateral, _ = nearest.position_robot_frame
+        return self._serialize_observed_object(nearest)
+
+    def _serialize_obstacles(self, objects: List[ObservedObject]) -> List[ObstacleEstimate]:
+        return [self._serialize_observed_object(obj) for obj in objects]
+
+    def _serialize_observed_object(self, obj: ObservedObject) -> ObstacleEstimate:
         return ObstacleEstimate(
-            object_id=nearest.object_id,
-            category=nearest.category,
-            forward_distance_m=round(float(forward), 3),
-            lateral_offset_m=round(float(lateral), 3),
-            distance_m=round(euclidean_distance_3d(nearest.position_robot_frame), 3),
-            width_m=round(float(nearest.size[1]), 3),
-            source=nearest.attributes.get("source", "detector"),
+            object_id=obj.object_id,
+            category=obj.category,
+            forward_distance_m=round(float(obj.position_robot_frame[0]), 3),
+            lateral_offset_m=round(float(obj.position_robot_frame[1]), 3),
+            distance_m=round(euclidean_distance_3d(obj.position_robot_frame), 3),
+            width_m=round(float(obj.size[1]), 3),
+            source=obj.attributes.get("source", "detector"),
         )
 
     def _estimate_free_space(

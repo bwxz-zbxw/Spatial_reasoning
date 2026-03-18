@@ -69,11 +69,17 @@ def main() -> None:
         robot_width_m=args.robot_width_m,
         safety_margin_m=args.safety_margin_m,
     )
+    branch.reset_tracks()
 
     rows = []
     for frame in selected_frames:
         depth_m = loader.load_aligned_depth_meters(frame)
-        state = branch.estimate(depth_m=depth_m, intrinsics=intrinsics, detected_objects=[])
+        state = branch.estimate(
+            depth_m=depth_m,
+            intrinsics=intrinsics,
+            detected_objects=[],
+            frame_index=frame.frame_index,
+        )
         rows.append(
             {
                 "frame_index": frame.frame_index,
@@ -84,8 +90,18 @@ def main() -> None:
                 "corridor_width_m": state.corridor_width_m,
                 "traversable_width_m": state.traversable_width_m,
                 "passable": state.passable,
+                "nearest_obstacle_distance_m": state.nearest_obstacle.distance_m if state.nearest_obstacle else None,
+                "nearest_obstacle_forward_m": state.nearest_obstacle.forward_distance_m if state.nearest_obstacle else None,
+                "nearest_obstacle_lateral_m": state.nearest_obstacle.lateral_offset_m if state.nearest_obstacle else None,
+                "nearest_obstacle_width_m": state.nearest_obstacle.width_m if state.nearest_obstacle else None,
+                "nearest_obstacle_source": state.nearest_obstacle.source if state.nearest_obstacle else None,
+                "blocking_obstacle_count": len(state.blocking_obstacle_ids),
                 "left_wall_forward_m": state.left_wall.forward_distance_m if state.left_wall else None,
                 "right_wall_forward_m": state.right_wall.forward_distance_m if state.right_wall else None,
+                "left_wall_visible": branch._wall_tracks.get("left").visible if branch._wall_tracks.get("left") else None,
+                "right_wall_visible": branch._wall_tracks.get("right").visible if branch._wall_tracks.get("right") else None,
+                "left_wall_confidence": branch._wall_tracks.get("left").confidence if branch._wall_tracks.get("left") else None,
+                "right_wall_confidence": branch._wall_tracks.get("right").confidence if branch._wall_tracks.get("right") else None,
             }
         )
 
@@ -108,7 +124,7 @@ def main() -> None:
 
 
 def _plot_timeseries(df: pd.DataFrame, plot_path: Path, sequence_name: str) -> None:
-    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(12, 11), sharex=True)
 
     axes[0].plot(df["frame_index"], df["left_wall_distance_m"], label="left wall", linewidth=1.5)
     axes[0].plot(df["frame_index"], df["right_wall_distance_m"], label="right wall", linewidth=1.5)
@@ -125,12 +141,18 @@ def _plot_timeseries(df: pd.DataFrame, plot_path: Path, sequence_name: str) -> N
 
     passable_numeric = df["passable"].map({True: 1, False: 0})
     axes[2].step(df["frame_index"], passable_numeric, where="mid", label="passable", linewidth=1.5)
-    axes[2].set_xlabel("Frame Index")
     axes[2].set_ylabel("Passable")
     axes[2].set_yticks([0, 1])
     axes[2].set_yticklabels(["false", "true"])
     axes[2].grid(True, alpha=0.3)
     axes[2].legend()
+
+    axes[3].plot(df["frame_index"], df["nearest_obstacle_distance_m"], label="nearest obstacle distance", linewidth=1.5)
+    axes[3].plot(df["frame_index"], df["nearest_obstacle_lateral_m"], label="nearest obstacle lateral", linewidth=1.5)
+    axes[3].set_xlabel("Frame Index")
+    axes[3].set_ylabel("Obstacle")
+    axes[3].grid(True, alpha=0.3)
+    axes[3].legend()
 
     fig.tight_layout()
     fig.savefig(plot_path, dpi=150)
@@ -147,6 +169,8 @@ def _stats_summary(df: pd.DataFrame) -> str:
         "right_wall_distance_m",
         "corridor_width_m",
         "traversable_width_m",
+        "nearest_obstacle_distance_m",
+        "nearest_obstacle_lateral_m",
     ]
     lines = []
     for field in fields:
